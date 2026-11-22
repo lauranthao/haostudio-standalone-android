@@ -1,0 +1,147 @@
+# Android APK launch test — runs the shop-hosted APK on a GitHub-hosted
+# Android emulator (Pixel, API 33, x86_64) and captures logcat.
+# Purpose: verify the app launches, and get the REAL crash stack when it
+# doesn't (Appetize free tier can't give logcat, and its minutes ran out).
+# Trigger: Actions tab -> this workflow -> Run workflow (branch android-apk).
+# The APK URL defaults to the shop-hosted v1.1.2 APK; override to test another build.
+name: Android APK launch test
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: 'APK download URL'
+        required: false
+        default: 'https://chen-hao-shop-production.up.railway.app/HAoStudio-standalone-v1.1.2.apk'
+
+jobs:
+  launch-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "NO /dev/kvm"
+
+      - name: Launch APK on emulator and capture logcat
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: default
+          arch: x86_64
+          profile: Nexus 5
+          emulator-boot-timeout: 1500
+          script: |
+            set -x
+            curl -sL -o /tmp/hao.apk "${{ inputs.apk_url }}"
+            ls -l /tmp/hao.apk
+            adb install /tmp/hao.apk
+            adb shell am start -n com.haostudio.standalone/.MainActivity
+            sleep 15
+            echo "=== pidof (empty = process dead) ==="
+            adb shell pidof com.haostudio.standalone || echo "PROCESS_NOT_RUNNING"
+            adb shell uiautomator dump /sdcard/ui.xml
+            adb pull /sdcard/ui.xml $GITHUB_WORKSPACE/ui.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/home.png
+            adb shell input tap 663 1662
+            sleep 3
+            adb shell uiautomator dump /sdcard/ui-music.xml
+            adb pull /sdcard/ui-music.xml $GITHUB_WORKSPACE/ui-music.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/music-home.png
+            adb shell input tap 417 525
+            sleep 2
+            adb shell uiautomator dump /sdcard/ui-search.xml
+            adb pull /sdcard/ui-search.xml $GITHUB_WORKSPACE/ui-search.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/search-page.png
+            adb shell input tap 451 357
+            sleep 1
+            adb shell input text 'Die%sFor%sYou'
+            sleep 1
+            adb shell input tap 900 357
+            sleep 6
+            adb shell uiautomator dump /sdcard/ui-results.xml
+            adb pull /sdcard/ui-results.xml $GITHUB_WORKSPACE/ui-results.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/search-results.png
+            adb shell input tap 540 813
+            sleep 12
+            adb shell uiautomator dump /sdcard/ui-player.xml
+            adb pull /sdcard/ui-player.xml $GITHUB_WORKSPACE/ui-player.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/player.png
+            for i in $(seq 1 12); do adb shell uiautomator dump /sdcard/ui-player.xml >/dev/null 2>&1; adb pull /sdcard/ui-player.xml $GITHUB_WORKSPACE/ui-player.xml >/dev/null 2>&1; PROG=$(python3 -c "import re; s=open('$GITHUB_WORKSPACE/ui-player.xml').read(); ds=[d for d in re.findall(r'content-desc=\"([^\"]*)\"', s) if d]; print(ds)" 2>/dev/null); echo "wait-playing $i: $PROG"; echo "$PROG" | grep -qv "'0:00', '0:00'" && break; sleep 5; done
+            adb shell cmd statusbar expand-notifications
+            sleep 2
+            adb shell uiautomator dump /sdcard/ui-notif.xml || true
+            adb pull /sdcard/ui-notif.xml $GITHUB_WORKSPACE/ui-notif.xml || true
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/notif-shade.png
+            adb shell input tap $(python3 -c "import re; s=open('$GITHUB_WORKSPACE/ui-notif.xml').read(); m=re.search(r'resource-id=\"android:id/action1\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"', s); print((int(m.group(1))+int(m.group(3)))//2, (int(m.group(2))+int(m.group(4)))//2)" 2>/dev/null || echo "258 864")
+            sleep 3
+            adb shell cmd statusbar collapse
+            sleep 1
+            adb shell uiautomator dump /sdcard/ui-player-paused.xml || true
+            adb pull /sdcard/ui-player-paused.xml $GITHUB_WORKSPACE/ui-player-paused.xml || true
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/player-paused.png
+            adb shell cmd statusbar expand-notifications
+            sleep 2
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/notif-shade-paused.png
+            adb shell cmd statusbar collapse || adb shell input keyevent 4 || true
+            adb shell dumpsys notification | grep -i "hao_music_playback" | head -5 || true
+            adb shell dumpsys media_session | head -50
+            adb shell input keyevent 4
+            sleep 1
+            adb shell input tap 171 1662
+            sleep 3
+            adb shell uiautomator dump /sdcard/ui-video.xml
+            adb pull /sdcard/ui-video.xml $GITHUB_WORKSPACE/ui-video.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/video-home.png
+            adb shell input tap 234 1404
+            sleep 3
+            adb shell uiautomator dump /sdcard/ui-detail.xml
+            adb pull /sdcard/ui-detail.xml $GITHUB_WORKSPACE/ui-detail.xml
+            adb exec-out screencap -p > $GITHUB_WORKSPACE/video-detail.png
+            adb logcat -d > "$GITHUB_WORKSPACE/logcat.txt"
+            echo "=== crash lines ==="
+            grep -iE "FATAL EXCEPTION|AndroidRuntime|com.haostudio|signal 11|libc.*fatal|UnsatisfiedLink" "$GITHUB_WORKSPACE/logcat.txt" | head -60 || true
+
+      - name: Upload logcat
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-logcat
+          path: |
+            logcat.txt
+            ui.xml
+            home.png
+            ui-music.xml
+            music-home.png
+            ui-search.xml
+            search-page.png
+            ui-results.xml
+            search-results.png
+            ui-player.xml
+            player.png
+            ui-video.xml
+            video-home.png
+            ui-detail.xml
+            video-detail.png
+            ui-notif.xml
+            notif-shade.png
+            ui-player-paused.xml
+            player-paused.png
+            notif-shade-paused.png
+          retention-days: 7
